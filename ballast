@@ -16,7 +16,7 @@ set_defaults() {
     monitor_path="${monitor_path:-/}"
     monitor_interval="${monitor_interval:-30}"
     monitor_threshold="${monitor_threshold:-90}"
-    monitor_recovery="${monitor_recovery:-80}"
+    monitor_recovery="${monitor_recovery:-70}"
 
     # Calculate ballast size if not set
     if [[ -z "${ballast_size_gb:-}" ]]; then
@@ -308,8 +308,8 @@ cmd_setup() {
     read -p "Drop threshold % [90]: " inp_threshold
     inp_threshold="${inp_threshold:-90}"
 
-    read -p "Recovery threshold % [80]: " inp_recovery
-    inp_recovery="${inp_recovery:-80}"
+    read -p "Recovery threshold % [70]: " inp_recovery
+    inp_recovery="${inp_recovery:-70}"
 
     if [[ "$inp_recovery" -ge "$inp_threshold" ]]; then
         echo "Warning: Recovery must be less than threshold. Using $((inp_threshold - 10))%"

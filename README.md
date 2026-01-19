@@ -21,7 +21,7 @@ sudo chmod +x /usr/local/bin/ballast
 **Zero-config (uses smart defaults):**
 ```bash
 sudo ballast init    # Creates 10GB ballast (or 20% of disk if smaller)
-sudo ballast run     # Monitors /, drops at 90%, recovers at 80%
+sudo ballast run     # Monitors /, drops at 90%, recovers at 70%
 ```
 
 **With configuration:**
@@ -40,7 +40,7 @@ Works out of the box with no config file:
 | Ballast size | 10GB (capped at 20% of disk, min 1GB) |
 | Monitor path | `/` |
 | Drop threshold | 90% |
-| Recovery threshold | 80% |
+| Recovery threshold | 70% |
 | Check interval | 30s |
 
 Config file (`/etc/ballast.conf`) overrides defaults. Only needed for alerts or custom settings.
@@ -60,7 +60,7 @@ Config file (`/etc/ballast.conf`) overrides defaults. Only needed for alerts or 
 │  Ballast dropped → 10GB freed → Alert sent → You have time      │
 └─────────────────────────────────────────────────────────────────┘
                               │
-                    Disk recovers to 80%
+                    Disk recovers to 70%
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                         RECOVERED                               │
@@ -93,7 +93,7 @@ size_gb = 10
 path = /
 interval = 30
 threshold = 90
-recovery = 80
+recovery = 70
 
 [slack]
 enabled = true
