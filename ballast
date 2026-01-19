@@ -290,12 +290,12 @@ ballast - Disk space emergency release system
 Usage: ballast [options] <command>
 
 Commands:
-  run      Start the monitoring daemon
-  init     Create the ballast file
-  status   Show disk usage and ballast state
-  drop     Manually drop the ballast file
+  status   Show disk and ballast state
+  init     Create ballast file
+  drop     Drop ballast (emergency)
+  recover  Recreate ballast after drop
+  run      Start daemon in foreground
   version  Print version
-  help     Print this help
 
 Options:
   -c PATH  Config file (default: /etc/ballast.conf)
@@ -355,10 +355,10 @@ main() {
     set_defaults
 
     case "$cmd" in
-        run)    cmd_run ;;
-        init)   cmd_init ;;
-        status) cmd_status ;;
-        drop)   cmd_drop ;;
+        run)             cmd_run ;;
+        init|recover)    cmd_init ;;
+        status)          cmd_status ;;
+        drop)            cmd_drop ;;
         *)
             echo "Unknown command: $cmd" >&2
             cmd_help

@@ -13,10 +13,17 @@ curl -sSL https://raw.githubusercontent.com/cole-robertson/ballast/master/instal
 ## Usage
 
 ```bash
-sudo ballast init     # Create 10GB ballast file
-sudo ballast status   # Check disk and ballast state
-sudo ballast run      # Start daemon (or use systemd)
-sudo ballast drop     # Emergency manual drop
+# Setup
+sudo ballast init                    # Create 10GB ballast file
+sudo systemctl enable --now ballast  # Start daemon
+
+# Monitor
+sudo ballast status                  # Check disk and ballast state
+sudo journalctl -u ballast -f        # Watch logs
+
+# Emergency
+sudo ballast drop                    # Manually drop ballast
+sudo ballast recover                 # Recreate after cleanup
 ```
 
 ## How It Works
