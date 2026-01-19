@@ -146,6 +146,14 @@ sudo ballast init
 
 This works regardless of thresholds.
 
+## Uninstall
+
+```bash
+curl -sSL https://raw.githubusercontent.com/cole-robertson/ballast/master/uninstall.sh | sudo bash
+```
+
+Prompts before removing config and data.
+
 ## Requirements
 
 - Linux (uses `fallocate` or `truncate`)
