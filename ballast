@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-VERSION="0.1.0"
+VERSION="0.2.0"
 DEFAULT_CONFIG="/etc/ballast.conf"
 
 # State: "active" or "dropped"
@@ -15,8 +15,12 @@ set_defaults() {
     ballast_path="${ballast_path:-/var/lib/ballast/ballast.dat}"
     monitor_path="${monitor_path:-/}"
     monitor_interval="${monitor_interval:-30}"
-    monitor_threshold="${monitor_threshold:-90}"
-    monitor_recovery="${monitor_recovery:-70}"
+
+    # Ballast-relative thresholds (multipliers)
+    # drop_buffer=1.5 means drop when free space < 1.5x ballast size
+    # recover_buffer=3.0 means recover when free space > 3.0x ballast size
+    monitor_drop_buffer="${monitor_drop_buffer:-1.5}"
+    monitor_recover_buffer="${monitor_recover_buffer:-3.0}"
     monitor_auto_recover="${monitor_auto_recover:-true}"
 
     # Calculate ballast size if not set
@@ -92,12 +96,17 @@ parse_config() {
 #
 # Disk usage helpers
 #
-get_disk_usage_percent() {
-    df "$monitor_path" | awk 'NR==2 {gsub(/%/,""); print $5}'
+get_disk_free_gb() {
+    local free_bytes=$(df -B1 "$monitor_path" | awk 'NR==2 {print $4}')
+    echo "scale=1; $free_bytes / 1024 / 1024 / 1024" | bc
 }
 
 get_disk_free_bytes() {
     df -B1 "$monitor_path" | awk 'NR==2 {print $4}'
+}
+
+get_disk_usage_percent() {
+    df "$monitor_path" | awk 'NR==2 {gsub(/%/,""); print $5}'
 }
 
 #
@@ -129,17 +138,28 @@ get_ballast_size() {
 }
 
 #
+# Threshold calculations
+#
+get_drop_threshold_gb() {
+    echo "scale=1; $ballast_size_gb * $monitor_drop_buffer" | bc
+}
+
+get_recover_threshold_gb() {
+    echo "scale=1; $ballast_size_gb * $monitor_recover_buffer" | bc
+}
+
+#
 # Alert functions
 #
 send_alerts() {
     local event="$1"  # "dropped" or "recovered"
-    local usage="$2"
+    local free_gb="$2"
     local message
 
     if [[ "$event" == "dropped" ]]; then
-        message="ALERT: Disk usage at ${usage}% on $(hostname). Ballast file dropped to free ${ballast_size_gb}GB."
+        message="ALERT: Disk on $(hostname) low (${free_gb}GB free). Ballast dropped to free ${ballast_size_gb}GB."
     else
-        message="OK: Disk usage recovered to ${usage}% on $(hostname). Ballast file recreated."
+        message="OK: Disk on $(hostname) recovered (${free_gb}GB free). Ballast recreated."
     fi
 
     # Slack
@@ -160,7 +180,7 @@ send_alerts() {
     if [[ "${webhook_enabled:-false}" == "true" && -n "${webhook_url:-}" ]]; then
         local method="${webhook_method:-POST}"
         curl -sf -X "$method" -H 'Content-Type: application/json' \
-            -d "{\"event\": \"$event\", \"usage_percent\": $usage, \"hostname\": \"$(hostname)\", \"message\": \"$message\"}" \
+            -d "{\"event\": \"$event\", \"free_gb\": $free_gb, \"hostname\": \"$(hostname)\", \"message\": \"$message\"}" \
             "$webhook_url" >/dev/null 2>&1 || true
     fi
 
@@ -181,24 +201,30 @@ send_alerts() {
 # State machine
 #
 check_and_act() {
-    local usage=$(get_disk_usage_percent)
-    local threshold="${monitor_threshold:-90}"
-    local recovery="${monitor_recovery:-80}"
+    local free_gb=$(get_disk_free_gb)
+    local drop_threshold=$(get_drop_threshold_gb)
+    local recover_threshold=$(get_recover_threshold_gb)
 
     case "$STATE" in
         active)
-            if [[ "$usage" -ge "$threshold" ]]; then
-                echo "$(date -Iseconds) Disk at ${usage}% >= ${threshold}%, dropping ballast"
+            # Drop when free space < drop_buffer × ballast
+            if (( $(echo "$free_gb < $drop_threshold" | bc -l) )); then
+                echo "$(date -Iseconds) Free space ${free_gb}GB < ${drop_threshold}GB, dropping ballast"
                 drop_ballast
-                send_alerts "dropped" "$usage"
+                # Recalculate free space after drop
+                free_gb=$(get_disk_free_gb)
+                send_alerts "dropped" "$free_gb"
                 STATE="dropped"
             fi
             ;;
         dropped)
-            if [[ "$usage" -le "$recovery" && "${monitor_auto_recover}" == "true" ]]; then
-                echo "$(date -Iseconds) Disk at ${usage}% <= ${recovery}%, recreating ballast"
+            # Recover when free space > recover_buffer × ballast
+            if [[ "${monitor_auto_recover}" == "true" ]] && (( $(echo "$free_gb > $recover_threshold" | bc -l) )); then
+                echo "$(date -Iseconds) Free space ${free_gb}GB > ${recover_threshold}GB, recreating ballast"
                 create_ballast
-                send_alerts "recovered" "$usage"
+                # Recalculate free space after create
+                free_gb=$(get_disk_free_gb)
+                send_alerts "recovered" "$free_gb"
                 STATE="active"
             fi
             ;;
@@ -209,14 +235,17 @@ check_and_act() {
 # Commands
 #
 cmd_run() {
-    local interval="${monitor_interval:-30}"
+    local interval="${monitor_interval}"
+    local drop_threshold=$(get_drop_threshold_gb)
+    local recover_threshold=$(get_recover_threshold_gb)
 
     echo "Starting ballast daemon"
     echo "  Monitor: $monitor_path"
-    echo "  Threshold: ${monitor_threshold}%"
-    echo "  Recovery: ${monitor_recovery}% (auto: ${monitor_auto_recover})"
-    echo "  Interval: ${interval}s"
     echo "  Ballast: $ballast_path (${ballast_size_gb}GB)"
+    echo "  Drop when: free < ${drop_threshold}GB (${monitor_drop_buffer}x ballast)"
+    echo "  Recover when: free > ${recover_threshold}GB (${monitor_recover_buffer}x ballast)"
+    echo "  Auto-recover: ${monitor_auto_recover}"
+    echo "  Interval: ${interval}s"
     echo ""
 
     if ballast_exists; then
@@ -245,24 +274,27 @@ cmd_init() {
 }
 
 cmd_status() {
+    local free_gb=$(get_disk_free_gb)
+    local free_bytes=$(get_disk_free_bytes)
     local usage=$(get_disk_usage_percent)
-    local free=$(get_disk_free_bytes)
+    local drop_threshold=$(get_drop_threshold_gb)
+    local recover_threshold=$(get_recover_threshold_gb)
 
     echo "Disk: $monitor_path"
+    echo "  Free: $(numfmt --to=iec $free_bytes) (${free_gb}GB)"
     echo "  Usage: ${usage}%"
-    echo "  Free: $(numfmt --to=iec $free)"
     echo ""
     echo "Ballast: $ballast_path"
     if ballast_exists; then
-        echo "  Status: exists"
+        echo "  Status: active"
         echo "  Size: $(numfmt --to=iec $(get_ballast_size))"
     else
-        echo "  Status: not present"
+        echo "  Status: dropped"
     fi
     echo ""
-    echo "Thresholds:"
-    echo "  Drop at: ${monitor_threshold}%"
-    echo "  Recover at: ${monitor_recovery}%"
+    echo "Thresholds (based on ${ballast_size_gb}GB ballast):"
+    echo "  Drop when free < ${drop_threshold}GB (${monitor_drop_buffer}x)"
+    echo "  Recover when free > ${recover_threshold}GB (${monitor_recover_buffer}x)"
     echo "  Auto-recover: ${monitor_auto_recover}"
 }
 
@@ -307,18 +339,21 @@ cmd_setup() {
 
     echo ""
     echo "== Thresholds =="
-    read -p "Drop threshold % [90]: " inp_threshold
-    inp_threshold="${inp_threshold:-90}"
+    echo "Thresholds are multipliers of ballast size."
+    echo "With ${inp_size}GB ballast:"
+    local default_drop=$(echo "scale=1; $inp_size * 1.5" | bc)
+    local default_recover=$(echo "scale=1; $inp_size * 3.0" | bc)
+    echo "  - drop_buffer=1.5 means drop when free < ${default_drop}GB"
+    echo "  - recover_buffer=3.0 means recover when free > ${default_recover}GB"
+    echo ""
 
-    read -p "Recovery threshold % [70]: " inp_recovery
-    inp_recovery="${inp_recovery:-70}"
+    read -p "Drop buffer multiplier [1.5]: " inp_drop_buffer
+    inp_drop_buffer="${inp_drop_buffer:-1.5}"
 
-    if [[ "$inp_recovery" -ge "$inp_threshold" ]]; then
-        echo "Warning: Recovery must be less than threshold. Using $((inp_threshold - 10))%"
-        inp_recovery=$((inp_threshold - 10))
-    fi
+    read -p "Recover buffer multiplier [3.0]: " inp_recover_buffer
+    inp_recover_buffer="${inp_recover_buffer:-3.0}"
 
-    read -p "Auto-recover when disk usage drops? [Y/n]: " inp_auto_recover
+    read -p "Auto-recover when disk frees up? [Y/n]: " inp_auto_recover
     if [[ "${inp_auto_recover,,}" == "n" ]]; then
         inp_auto_recover="false"
     else
@@ -368,6 +403,10 @@ cmd_setup() {
         webhook_section="[webhook]\nenabled = true\nurl = $inp_webhook_url\nmethod = $inp_webhook_method"
     fi
 
+    # Calculate actual thresholds for display
+    local actual_drop=$(echo "scale=1; $inp_size * $inp_drop_buffer" | bc)
+    local actual_recover=$(echo "scale=1; $inp_size * $inp_recover_buffer" | bc)
+
     # Generate config
     config="# Ballast configuration
 # Generated by: ballast setup
@@ -379,8 +418,11 @@ size_gb = $inp_size
 [monitor]
 path = $inp_monitor
 interval = $inp_interval
-threshold = $inp_threshold
-recovery = $inp_recovery
+# Thresholds are multipliers of ballast size
+# drop_buffer=1.5 with ${inp_size}GB ballast = drop when free < ${actual_drop}GB
+# recover_buffer=3.0 with ${inp_size}GB ballast = recover when free > ${actual_recover}GB
+drop_buffer = $inp_drop_buffer
+recover_buffer = $inp_recover_buffer
 auto_recover = $inp_auto_recover
 
 $(echo -e "$slack_section")
@@ -426,6 +468,11 @@ Commands:
 
 Options:
   -c PATH  Config file (default: /etc/ballast.conf)
+
+Defaults (no config needed):
+  Ballast: 10GB (or 20% of disk if smaller)
+  Drop: when free space < 1.5x ballast (15GB)
+  Recover: when free space > 3.0x ballast (30GB)
 
 EOF
 }
