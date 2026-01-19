@@ -1,0 +1,429 @@
+#!/bin/bash
+set -euo pipefail
+
+VERSION="0.1.0"
+DEFAULT_CONFIG="/etc/ballast.conf"
+
+# State: "active" or "dropped"
+STATE="active"
+
+#
+# INI Parser - sets variables like section_key=value
+#
+parse_config() {
+    local file="$1"
+    local section=""
+
+    [[ ! -f "$file" ]] && { echo "Config not found: $file" >&2; exit 1; }
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        # Trim whitespace
+        line="${line#"${line%%[![:space:]]*}"}"
+        line="${line%"${line##*[![:space:]]}"}"
+
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[#\;] ]] && continue
+
+        # Section header
+        if [[ "$line" =~ ^\[([a-zA-Z0-9_]+)\]$ ]]; then
+            section="${BASH_REMATCH[1]}_"
+            continue
+        fi
+
+        # Key = value
+        if [[ "$line" =~ ^([a-zA-Z0-9_]+)[[:space:]]*=[[:space:]]*(.*)$ ]]; then
+            local key="${BASH_REMATCH[1]}"
+            local value="${BASH_REMATCH[2]}"
+            # Remove surrounding quotes if present
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+            declare -g "${section}${key}=${value}"
+        fi
+    done < "$file"
+}
+
+#
+# Disk usage helpers
+#
+get_disk_usage_percent() {
+    df "$monitor_path" | awk 'NR==2 {gsub(/%/,""); print $5}'
+}
+
+get_disk_free_bytes() {
+    df -B1 "$monitor_path" | awk 'NR==2 {print $4}'
+}
+
+#
+# Ballast file operations
+#
+create_ballast() {
+    local size_bytes=$((ballast_size_gb * 1024 * 1024 * 1024))
+    local dir=$(dirname "$ballast_path")
+
+    mkdir -p "$dir"
+
+    if command -v fallocate &>/dev/null; then
+        fallocate -l "$size_bytes" "$ballast_path"
+    else
+        truncate -s "$size_bytes" "$ballast_path"
+    fi
+}
+
+drop_ballast() {
+    [[ -f "$ballast_path" ]] && rm -f "$ballast_path"
+}
+
+ballast_exists() {
+    [[ -f "$ballast_path" ]]
+}
+
+get_ballast_size() {
+    [[ -f "$ballast_path" ]] && stat -c%s "$ballast_path" || echo 0
+}
+
+#
+# Alert functions
+#
+send_alerts() {
+    local event="$1"  # "dropped" or "recovered"
+    local usage="$2"
+    local message
+
+    if [[ "$event" == "dropped" ]]; then
+        message="ALERT: Disk usage at ${usage}% on $(hostname). Ballast file dropped to free ${ballast_size_gb}GB."
+    else
+        message="OK: Disk usage recovered to ${usage}% on $(hostname). Ballast file recreated."
+    fi
+
+    # Slack
+    if [[ "${slack_enabled:-false}" == "true" && -n "${slack_webhook:-}" ]]; then
+        curl -sf -X POST -H 'Content-Type: application/json' \
+            -d "{\"text\": \"$message\"}" \
+            "$slack_webhook" >/dev/null 2>&1 || true
+    fi
+
+    # Discord
+    if [[ "${discord_enabled:-false}" == "true" && -n "${discord_webhook:-}" ]]; then
+        curl -sf -X POST -H 'Content-Type: application/json' \
+            -d "{\"content\": \"$message\"}" \
+            "$discord_webhook" >/dev/null 2>&1 || true
+    fi
+
+    # Generic webhook
+    if [[ "${webhook_enabled:-false}" == "true" && -n "${webhook_url:-}" ]]; then
+        local method="${webhook_method:-POST}"
+        curl -sf -X "$method" -H 'Content-Type: application/json' \
+            -d "{\"event\": \"$event\", \"usage_percent\": $usage, \"hostname\": \"$(hostname)\", \"message\": \"$message\"}" \
+            "$webhook_url" >/dev/null 2>&1 || true
+    fi
+
+    # Email via curl
+    if [[ "${email_enabled:-false}" == "true" && -n "${email_smtp:-}" ]]; then
+        local subject="[ballast] Disk $event on $(hostname)"
+        printf "Subject: %s\nFrom: %s\nTo: %s\n\n%s" \
+            "$subject" "${email_from:-}" "${email_to:-}" "$message" | \
+        curl -sf --url "$email_smtp" \
+            --mail-from "${email_from:-}" \
+            --mail-rcpt "${email_to:-}" \
+            --user "${email_user:-}:${email_pass:-}" \
+            -T - >/dev/null 2>&1 || true
+    fi
+}
+
+#
+# State machine
+#
+check_and_act() {
+    local usage=$(get_disk_usage_percent)
+    local threshold="${monitor_threshold:-90}"
+    local recovery="${monitor_recovery:-80}"
+
+    case "$STATE" in
+        active)
+            if [[ "$usage" -ge "$threshold" ]]; then
+                echo "$(date -Iseconds) Disk at ${usage}% >= ${threshold}%, dropping ballast"
+                drop_ballast
+                send_alerts "dropped" "$usage"
+                STATE="dropped"
+            fi
+            ;;
+        dropped)
+            if [[ "$usage" -le "$recovery" ]]; then
+                echo "$(date -Iseconds) Disk at ${usage}% <= ${recovery}%, recreating ballast"
+                create_ballast
+                send_alerts "recovered" "$usage"
+                STATE="active"
+            fi
+            ;;
+    esac
+}
+
+#
+# Commands
+#
+cmd_run() {
+    local interval="${monitor_interval:-30}"
+
+    echo "Starting ballast daemon"
+    echo "  Monitor: $monitor_path"
+    echo "  Threshold: ${monitor_threshold:-90}%"
+    echo "  Recovery: ${monitor_recovery:-80}%"
+    echo "  Interval: ${interval}s"
+    echo "  Ballast: $ballast_path (${ballast_size_gb}GB)"
+    echo ""
+
+    if ballast_exists; then
+        STATE="active"
+        echo "Ballast file exists, state: active"
+    else
+        STATE="dropped"
+        echo "Ballast file missing, state: dropped"
+    fi
+
+    while true; do
+        check_and_act
+        sleep "$interval"
+    done
+}
+
+cmd_init() {
+    if ballast_exists; then
+        echo "Ballast already exists: $ballast_path ($(numfmt --to=iec $(get_ballast_size)))"
+        exit 0
+    fi
+
+    echo "Creating ballast file: $ballast_path (${ballast_size_gb}GB)"
+    create_ballast
+    echo "Done"
+}
+
+cmd_status() {
+    local usage=$(get_disk_usage_percent)
+    local free=$(get_disk_free_bytes)
+
+    echo "Disk: $monitor_path"
+    echo "  Usage: ${usage}%"
+    echo "  Free: $(numfmt --to=iec $free)"
+    echo ""
+    echo "Ballast: $ballast_path"
+    if ballast_exists; then
+        echo "  Status: exists"
+        echo "  Size: $(numfmt --to=iec $(get_ballast_size))"
+    else
+        echo "  Status: not present"
+    fi
+    echo ""
+    echo "Thresholds:"
+    echo "  Drop at: ${monitor_threshold:-90}%"
+    echo "  Recover at: ${monitor_recovery:-80}%"
+}
+
+cmd_drop() {
+    if ! ballast_exists; then
+        echo "Ballast not present"
+        exit 0
+    fi
+
+    local size=$(get_ballast_size)
+    drop_ballast
+    echo "Dropped ballast file, freed $(numfmt --to=iec $size)"
+}
+
+cmd_setup() {
+    echo "Ballast Setup"
+    echo "============="
+    echo ""
+
+    # Ballast settings
+    echo "== Ballast File =="
+    read -p "Ballast file path [/var/lib/ballast/ballast.dat]: " inp_path
+    inp_path="${inp_path:-/var/lib/ballast/ballast.dat}"
+
+    read -p "Ballast size in GB [10]: " inp_size
+    inp_size="${inp_size:-10}"
+
+    # Monitor settings
+    echo ""
+    echo "== Disk Monitor =="
+    read -p "Mount point to monitor [/]: " inp_monitor
+    inp_monitor="${inp_monitor:-/}"
+
+    read -p "Check interval in seconds [30]: " inp_interval
+    inp_interval="${inp_interval:-30}"
+
+    read -p "Drop threshold % [90]: " inp_threshold
+    inp_threshold="${inp_threshold:-90}"
+
+    read -p "Recovery threshold % [80]: " inp_recovery
+    inp_recovery="${inp_recovery:-80}"
+
+    if [[ "$inp_recovery" -ge "$inp_threshold" ]]; then
+        echo "Warning: Recovery must be less than threshold. Using $((inp_threshold - 10))%"
+        inp_recovery=$((inp_threshold - 10))
+    fi
+
+    # Alerts
+    echo ""
+    echo "== Alerts =="
+
+    # Slack
+    read -p "Enable Slack alerts? [y/N]: " inp_slack
+    slack_section="[slack]\nenabled = false"
+    if [[ "${inp_slack,,}" == "y" ]]; then
+        read -p "Slack webhook URL: " inp_slack_url
+        slack_section="[slack]\nenabled = true\nwebhook = $inp_slack_url"
+    fi
+
+    # Discord
+    read -p "Enable Discord alerts? [y/N]: " inp_discord
+    discord_section="[discord]\nenabled = false"
+    if [[ "${inp_discord,,}" == "y" ]]; then
+        read -p "Discord webhook URL: " inp_discord_url
+        discord_section="[discord]\nenabled = true\nwebhook = $inp_discord_url"
+    fi
+
+    # Email
+    read -p "Enable Email alerts? [y/N]: " inp_email
+    email_section="[email]\nenabled = false"
+    if [[ "${inp_email,,}" == "y" ]]; then
+        read -p "SMTP URL (e.g., smtps://smtp.gmail.com:465): " inp_smtp
+        read -p "SMTP username: " inp_email_user
+        read -s -p "SMTP password: " inp_email_pass
+        echo ""
+        read -p "From address: " inp_email_from
+        read -p "To address: " inp_email_to
+        email_section="[email]\nenabled = true\nsmtp = $inp_smtp\nuser = $inp_email_user\npass = $inp_email_pass\nfrom = $inp_email_from\nto = $inp_email_to"
+    fi
+
+    # Webhook
+    read -p "Enable generic webhook alerts? [y/N]: " inp_webhook
+    webhook_section="[webhook]\nenabled = false"
+    if [[ "${inp_webhook,,}" == "y" ]]; then
+        read -p "Webhook URL: " inp_webhook_url
+        read -p "HTTP method [POST]: " inp_webhook_method
+        inp_webhook_method="${inp_webhook_method:-POST}"
+        webhook_section="[webhook]\nenabled = true\nurl = $inp_webhook_url\nmethod = $inp_webhook_method"
+    fi
+
+    # Generate config
+    config="# Ballast configuration
+# Generated by: ballast setup
+
+[ballast]
+path = $inp_path
+size_gb = $inp_size
+
+[monitor]
+path = $inp_monitor
+interval = $inp_interval
+threshold = $inp_threshold
+recovery = $inp_recovery
+
+$(echo -e "$slack_section")
+
+$(echo -e "$discord_section")
+
+$(echo -e "$email_section")
+
+$(echo -e "$webhook_section")
+"
+
+    echo ""
+    echo "== Generated Config =="
+    echo ""
+    echo "$config"
+
+    read -p "Write to $DEFAULT_CONFIG? [Y/n]: " inp_write
+    if [[ "${inp_write,,}" != "n" ]]; then
+        echo "$config" | sudo tee "$DEFAULT_CONFIG" > /dev/null
+        echo ""
+        echo "Config written to $DEFAULT_CONFIG"
+        echo ""
+        echo "Next steps:"
+        echo "  1. ballast init       # Create ballast file"
+        echo "  2. ballast run        # Start daemon (or use systemd)"
+    fi
+}
+
+cmd_help() {
+    cat <<EOF
+ballast - Disk space emergency release system
+
+Usage: ballast [options] <command>
+
+Commands:
+  run      Start the monitoring daemon
+  init     Create the ballast file
+  status   Show disk usage and ballast state
+  drop     Manually drop the ballast file
+  setup    Interactive configuration wizard
+  version  Print version
+  help     Print this help
+
+Options:
+  -c PATH  Config file (default: /etc/ballast.conf)
+
+EOF
+}
+
+#
+# Main
+#
+main() {
+    local config="$DEFAULT_CONFIG"
+    local cmd=""
+
+    # Parse arguments
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            -c)
+                config="$2"
+                shift 2
+                ;;
+            -*)
+                echo "Unknown option: $1" >&2
+                exit 1
+                ;;
+            *)
+                cmd="$1"
+                shift
+                break
+                ;;
+        esac
+    done
+
+    # Commands that don't need config
+    case "${cmd:-help}" in
+        version)
+            echo "ballast $VERSION"
+            exit 0
+            ;;
+        help|--help|-h)
+            cmd_help
+            exit 0
+            ;;
+        setup)
+            cmd_setup
+            exit 0
+            ;;
+    esac
+
+    # Load config for other commands
+    parse_config "$config"
+
+    case "$cmd" in
+        run)    cmd_run ;;
+        init)   cmd_init ;;
+        status) cmd_status ;;
+        drop)   cmd_drop ;;
+        *)
+            echo "Unknown command: $cmd" >&2
+            cmd_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

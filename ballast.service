@@ -1,0 +1,12 @@
+[Unit]
+Description=Ballast disk space emergency release daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ballast run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
