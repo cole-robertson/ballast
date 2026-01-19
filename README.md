@@ -157,7 +157,7 @@ Prompts before removing config and data.
 ## Requirements
 
 - Linux (uses `fallocate` or `truncate`)
-- bash, curl, df, bc (standard on any Linux)
+- bash, curl, df, awk (standard on any Linux)
 
 ## License
 

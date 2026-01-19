@@ -98,7 +98,7 @@ parse_config() {
 #
 get_disk_free_gb() {
     local free_bytes=$(df -B1 "$monitor_path" | awk 'NR==2 {print $4}')
-    echo "scale=1; $free_bytes / 1024 / 1024 / 1024" | bc
+    awk "BEGIN {printf \"%.1f\", $free_bytes / 1024 / 1024 / 1024}"
 }
 
 get_disk_free_bytes() {
@@ -141,11 +141,11 @@ get_ballast_size() {
 # Threshold calculations
 #
 get_drop_threshold_gb() {
-    echo "scale=1; $ballast_size_gb * $monitor_drop_buffer" | bc
+    awk "BEGIN {printf \"%.1f\", $ballast_size_gb * $monitor_drop_buffer}"
 }
 
 get_recover_threshold_gb() {
-    echo "scale=1; $ballast_size_gb * $monitor_recover_buffer" | bc
+    awk "BEGIN {printf \"%.1f\", $ballast_size_gb * $monitor_recover_buffer}"
 }
 
 #
@@ -208,7 +208,7 @@ check_and_act() {
     case "$STATE" in
         active)
             # Drop when free space < drop_buffer × ballast
-            if (( $(echo "$free_gb < $drop_threshold" | bc -l) )); then
+            if awk "BEGIN {exit !($free_gb < $drop_threshold)}"; then
                 echo "$(date -Iseconds) Free space ${free_gb}GB < ${drop_threshold}GB, dropping ballast"
                 drop_ballast
                 # Recalculate free space after drop
@@ -219,7 +219,7 @@ check_and_act() {
             ;;
         dropped)
             # Recover when free space > recover_buffer × ballast
-            if [[ "${monitor_auto_recover}" == "true" ]] && (( $(echo "$free_gb > $recover_threshold" | bc -l) )); then
+            if [[ "${monitor_auto_recover}" == "true" ]] && awk "BEGIN {exit !($free_gb > $recover_threshold)}"; then
                 echo "$(date -Iseconds) Free space ${free_gb}GB > ${recover_threshold}GB, recreating ballast"
                 create_ballast
                 # Recalculate free space after create
@@ -341,8 +341,8 @@ cmd_setup() {
     echo "== Thresholds =="
     echo "Thresholds are multipliers of ballast size."
     echo "With ${inp_size}GB ballast:"
-    local default_drop=$(echo "scale=1; $inp_size * 1.5" | bc)
-    local default_recover=$(echo "scale=1; $inp_size * 3.0" | bc)
+    local default_drop=$(awk "BEGIN {printf \"%.0f\", $inp_size * 1.5}")
+    local default_recover=$(awk "BEGIN {printf \"%.0f\", $inp_size * 3.0}")
     echo "  - drop_buffer=1.5 means drop when free < ${default_drop}GB"
     echo "  - recover_buffer=3.0 means recover when free > ${default_recover}GB"
     echo ""
@@ -404,8 +404,8 @@ cmd_setup() {
     fi
 
     # Calculate actual thresholds for display
-    local actual_drop=$(echo "scale=1; $inp_size * $inp_drop_buffer" | bc)
-    local actual_recover=$(echo "scale=1; $inp_size * $inp_recover_buffer" | bc)
+    local actual_drop=$(awk "BEGIN {printf \"%.0f\", $inp_size * $inp_drop_buffer}")
+    local actual_recover=$(awk "BEGIN {printf \"%.0f\", $inp_size * $inp_recover_buffer}")
 
     # Generate config
     config="# Ballast configuration
