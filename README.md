@@ -1,8 +1,8 @@
 # Ballast
 
-A dead-simple disk space emergency release system. ~300 lines of bash.
+Dead-simple disk space emergency release. ~250 lines of bash.
 
-**What it does:** Pre-allocates disk space via a "ballast" file. When your disk fills up, it drops the ballast to buy you time and alerts your team.
+Pre-allocates disk space. When disk fills up, drops it to buy you time and alerts your team.
 
 ## Install
 
@@ -10,154 +10,60 @@ A dead-simple disk space emergency release system. ~300 lines of bash.
 curl -sSL https://raw.githubusercontent.com/cole-robertson/ballast/master/install.sh | sudo bash
 ```
 
-That's it. Works immediately with smart defaults.
-
-## Quick Start
+## Usage
 
 ```bash
-# Zero config - just works
-sudo ballast init    # Creates 10GB ballast
-sudo ballast run     # Monitors disk, alerts when needed
-
-# Or use systemd
-sudo systemctl enable --now ballast
+sudo ballast init     # Create 10GB ballast file
+sudo ballast status   # Check disk and ballast state
+sudo ballast run      # Start daemon (or use systemd)
+sudo ballast drop     # Emergency manual drop
 ```
 
 ## How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         NORMAL STATE                            │
-│  Ballast file exists (10GB reserved)                            │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                    Free space drops below 15GB
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                        EMERGENCY                                │
-│  Ballast dropped → 10GB freed → Alert sent → You have time      │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                    Free space recovers above 30GB
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                         RECOVERED                               │
-│  Ballast recreated → Alert sent → Back to normal                │
-└─────────────────────────────────────────────────────────────────┘
+Normal:     10GB ballast file reserves space
+               ↓
+Disk fills: Free space < 15GB → drop ballast → alert sent → 10GB freed
+               ↓
+Recovery:   Free space > 30GB → recreate ballast → alert sent
 ```
 
-## Smart Defaults
+## Defaults
 
-Works out of the box with **no config file**:
+Works with **zero config**:
 
-| Setting | Default | What it means |
-|---------|---------|---------------|
-| Ballast size | 10GB | Your emergency reserve (capped at 20% of disk) |
-| Drop threshold | 1.5x ballast | Drop when < 15GB free |
-| Recover threshold | 3.0x ballast | Recover when > 30GB free |
-| Check interval | 30 seconds | How often to check disk |
-| Auto-recover | true | Automatically recreate ballast |
-
-**Why these multipliers?**
-
-- **1.5x drop**: Triggers before disk is critically full. At 15GB free, you have breathing room.
-- **3.0x recover**: Ensures no oscillation. After recreating 10GB ballast from 30GB free, you still have 20GB (above the 15GB drop threshold).
-
-**The math:** `recover_buffer > drop_buffer + 1` prevents oscillation.
-
-## Commands
-
-```bash
-ballast init     # Create the ballast file
-ballast status   # Show disk and ballast state
-ballast run      # Start the monitoring daemon
-ballast drop     # Manually drop ballast (emergency)
-ballast setup    # Interactive configuration wizard
-ballast help     # Print help
-```
+| Setting | Default |
+|---------|---------|
+| Ballast | 10GB (capped at 20% of disk) |
+| Drop | when free < 15GB (1.5× ballast) |
+| Recover | when free > 30GB (3× ballast) |
 
 ## Configuration
 
-Config file is **optional**. Only needed for alerts or custom settings.
-
-Location: `/etc/ballast.conf`
+Only needed for alerts. Edit `/etc/ballast.conf`:
 
 ```ini
-[ballast]
-path = /var/lib/ballast/ballast.dat
-size_gb = 10
-
-[monitor]
-path = /
-interval = 30
-# Thresholds are multipliers of ballast size
-drop_buffer = 1.5      # drop when free < 15GB (1.5 × 10GB)
-recover_buffer = 3.0   # recover when free > 30GB (3.0 × 10GB)
-auto_recover = true
-
 [discord]
 enabled = true
 webhook = https://discord.com/api/webhooks/XXX/YYY
 
 [slack]
-enabled = false
+enabled = true
 webhook = https://hooks.slack.com/services/XXX/YYY/ZZZ
 
-[email]
-enabled = false
-smtp = smtps://smtp.gmail.com:465
-user = alerts@example.com
-pass = app-password
-from = alerts@example.com
-to = ops@example.com
-
 [webhook]
-enabled = false
-url = https://example.com/webhook
-method = POST
+enabled = true
+url = https://example.com/hook
 ```
 
-Run `ballast setup` for an interactive wizard.
-
-## Alert Examples
-
-**Discord/Slack:**
-> ALERT: Disk on myserver low (12GB free). Ballast dropped to free 10GB.
-
-> OK: Disk on myserver recovered (35GB free). Ballast recreated.
-
-**Webhook JSON:**
-```json
-{
-  "event": "dropped",
-  "free_gb": 22,
-  "hostname": "myserver",
-  "message": "ALERT: Disk on myserver low (12GB free). Ballast dropped to free 10GB."
-}
-```
-
-## Manual Override
-
-Auto-recovery too conservative? You can always manually recreate:
-
-```bash
-sudo ballast init
-```
-
-This works regardless of thresholds.
+Then restart: `sudo systemctl restart ballast`
 
 ## Uninstall
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/cole-robertson/ballast/master/uninstall.sh | sudo bash
 ```
-
-Prompts before removing config and data.
-
-## Requirements
-
-- Linux (uses `fallocate` or `truncate`)
-- bash, curl, df, awk (standard on any Linux)
 
 ## License
 

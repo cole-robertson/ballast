@@ -151,50 +151,24 @@ get_recover_threshold_gb() {
 #
 # Alert functions
 #
+post_json() {
+    local url="$1" payload="$2"
+    curl -sf -X POST -H 'Content-Type: application/json' -d "$payload" "$url" &>/dev/null || true
+}
+
 send_alerts() {
-    local event="$1"  # "dropped" or "recovered"
-    local free_gb="$2"
-    local message
+    local event="$1" free_gb="$2"
+    local msg host=$(hostname)
 
     if [[ "$event" == "dropped" ]]; then
-        message="ALERT: Disk on $(hostname) low (${free_gb}GB free). Ballast dropped to free ${ballast_size_gb}GB."
+        msg="ALERT: Disk on $host low (${free_gb}GB free). Ballast dropped to free ${ballast_size_gb}GB."
     else
-        message="OK: Disk on $(hostname) recovered (${free_gb}GB free). Ballast recreated."
+        msg="OK: Disk on $host recovered (${free_gb}GB free). Ballast recreated."
     fi
 
-    # Slack
-    if [[ "${slack_enabled:-false}" == "true" && -n "${slack_webhook:-}" ]]; then
-        curl -sf -X POST -H 'Content-Type: application/json' \
-            -d "{\"text\": \"$message\"}" \
-            "$slack_webhook" >/dev/null 2>&1 || true
-    fi
-
-    # Discord
-    if [[ "${discord_enabled:-false}" == "true" && -n "${discord_webhook:-}" ]]; then
-        curl -sf -X POST -H 'Content-Type: application/json' \
-            -d "{\"content\": \"$message\"}" \
-            "$discord_webhook" >/dev/null 2>&1 || true
-    fi
-
-    # Generic webhook
-    if [[ "${webhook_enabled:-false}" == "true" && -n "${webhook_url:-}" ]]; then
-        local method="${webhook_method:-POST}"
-        curl -sf -X "$method" -H 'Content-Type: application/json' \
-            -d "{\"event\": \"$event\", \"free_gb\": $free_gb, \"hostname\": \"$(hostname)\", \"message\": \"$message\"}" \
-            "$webhook_url" >/dev/null 2>&1 || true
-    fi
-
-    # Email via curl
-    if [[ "${email_enabled:-false}" == "true" && -n "${email_smtp:-}" ]]; then
-        local subject="[ballast] Disk $event on $(hostname)"
-        printf "Subject: %s\nFrom: %s\nTo: %s\n\n%s" \
-            "$subject" "${email_from:-}" "${email_to:-}" "$message" | \
-        curl -sf --url "$email_smtp" \
-            --mail-from "${email_from:-}" \
-            --mail-rcpt "${email_to:-}" \
-            --user "${email_user:-}:${email_pass:-}" \
-            -T - >/dev/null 2>&1 || true
-    fi
+    [[ "${slack_enabled:-}" == "true" ]] && post_json "$slack_webhook" "{\"text\":\"$msg\"}"
+    [[ "${discord_enabled:-}" == "true" ]] && post_json "$discord_webhook" "{\"content\":\"$msg\"}"
+    [[ "${webhook_enabled:-}" == "true" ]] && post_json "$webhook_url" "{\"event\":\"$event\",\"free_gb\":$free_gb,\"hostname\":\"$host\",\"message\":\"$msg\"}"
 }
 
 #
@@ -309,148 +283,6 @@ cmd_drop() {
     echo "Dropped ballast file, freed $(numfmt --to=iec $size)"
 }
 
-cmd_setup() {
-    echo "Ballast Setup"
-    echo "============="
-    echo ""
-
-    # Monitor path first (needed for size calculation)
-    echo "== Disk Monitor =="
-    read -p "Mount point to monitor [/]: " inp_monitor
-    inp_monitor="${inp_monitor:-/}"
-
-    # Calculate recommended size based on disk
-    local recommended_size=$(calculate_ballast_size "$inp_monitor")
-    local disk_bytes=$(df -B1 "$inp_monitor" | awk 'NR==2 {print $2}')
-    local disk_gb=$((disk_bytes / 1024 / 1024 / 1024))
-
-    # Ballast settings
-    echo ""
-    echo "== Ballast File =="
-    echo "Disk size: ${disk_gb}GB (recommended ballast: ${recommended_size}GB)"
-    read -p "Ballast file path [/var/lib/ballast/ballast.dat]: " inp_path
-    inp_path="${inp_path:-/var/lib/ballast/ballast.dat}"
-
-    read -p "Ballast size in GB [$recommended_size]: " inp_size
-    inp_size="${inp_size:-$recommended_size}"
-
-    read -p "Check interval in seconds [30]: " inp_interval
-    inp_interval="${inp_interval:-30}"
-
-    echo ""
-    echo "== Thresholds =="
-    echo "Thresholds are multipliers of ballast size."
-    echo "With ${inp_size}GB ballast:"
-    local default_drop=$(awk "BEGIN {printf \"%.0f\", $inp_size * 1.5}")
-    local default_recover=$(awk "BEGIN {printf \"%.0f\", $inp_size * 3.0}")
-    echo "  - drop_buffer=1.5 means drop when free < ${default_drop}GB"
-    echo "  - recover_buffer=3.0 means recover when free > ${default_recover}GB"
-    echo ""
-
-    read -p "Drop buffer multiplier [1.5]: " inp_drop_buffer
-    inp_drop_buffer="${inp_drop_buffer:-1.5}"
-
-    read -p "Recover buffer multiplier [3.0]: " inp_recover_buffer
-    inp_recover_buffer="${inp_recover_buffer:-3.0}"
-
-    read -p "Auto-recover when disk frees up? [Y/n]: " inp_auto_recover
-    if [[ "${inp_auto_recover,,}" == "n" ]]; then
-        inp_auto_recover="false"
-    else
-        inp_auto_recover="true"
-    fi
-
-    # Alerts
-    echo ""
-    echo "== Alerts =="
-
-    # Slack
-    read -p "Enable Slack alerts? [y/N]: " inp_slack
-    slack_section="[slack]\nenabled = false"
-    if [[ "${inp_slack,,}" == "y" ]]; then
-        read -p "Slack webhook URL: " inp_slack_url
-        slack_section="[slack]\nenabled = true\nwebhook = $inp_slack_url"
-    fi
-
-    # Discord
-    read -p "Enable Discord alerts? [y/N]: " inp_discord
-    discord_section="[discord]\nenabled = false"
-    if [[ "${inp_discord,,}" == "y" ]]; then
-        read -p "Discord webhook URL: " inp_discord_url
-        discord_section="[discord]\nenabled = true\nwebhook = $inp_discord_url"
-    fi
-
-    # Email
-    read -p "Enable Email alerts? [y/N]: " inp_email
-    email_section="[email]\nenabled = false"
-    if [[ "${inp_email,,}" == "y" ]]; then
-        read -p "SMTP URL (e.g., smtps://smtp.gmail.com:465): " inp_smtp
-        read -p "SMTP username: " inp_email_user
-        read -s -p "SMTP password: " inp_email_pass
-        echo ""
-        read -p "From address: " inp_email_from
-        read -p "To address: " inp_email_to
-        email_section="[email]\nenabled = true\nsmtp = $inp_smtp\nuser = $inp_email_user\npass = $inp_email_pass\nfrom = $inp_email_from\nto = $inp_email_to"
-    fi
-
-    # Webhook
-    read -p "Enable generic webhook alerts? [y/N]: " inp_webhook
-    webhook_section="[webhook]\nenabled = false"
-    if [[ "${inp_webhook,,}" == "y" ]]; then
-        read -p "Webhook URL: " inp_webhook_url
-        read -p "HTTP method [POST]: " inp_webhook_method
-        inp_webhook_method="${inp_webhook_method:-POST}"
-        webhook_section="[webhook]\nenabled = true\nurl = $inp_webhook_url\nmethod = $inp_webhook_method"
-    fi
-
-    # Calculate actual thresholds for display
-    local actual_drop=$(awk "BEGIN {printf \"%.0f\", $inp_size * $inp_drop_buffer}")
-    local actual_recover=$(awk "BEGIN {printf \"%.0f\", $inp_size * $inp_recover_buffer}")
-
-    # Generate config
-    config="# Ballast configuration
-# Generated by: ballast setup
-
-[ballast]
-path = $inp_path
-size_gb = $inp_size
-
-[monitor]
-path = $inp_monitor
-interval = $inp_interval
-# Thresholds are multipliers of ballast size
-# drop_buffer=1.5 with ${inp_size}GB ballast = drop when free < ${actual_drop}GB
-# recover_buffer=3.0 with ${inp_size}GB ballast = recover when free > ${actual_recover}GB
-drop_buffer = $inp_drop_buffer
-recover_buffer = $inp_recover_buffer
-auto_recover = $inp_auto_recover
-
-$(echo -e "$slack_section")
-
-$(echo -e "$discord_section")
-
-$(echo -e "$email_section")
-
-$(echo -e "$webhook_section")
-"
-
-    echo ""
-    echo "== Generated Config =="
-    echo ""
-    echo "$config"
-
-    read -p "Write to $DEFAULT_CONFIG? [Y/n]: " inp_write
-    if [[ "${inp_write,,}" != "n" ]]; then
-        echo "$config" | sudo tee "$DEFAULT_CONFIG" > /dev/null
-        echo ""
-        echo "Config written to $DEFAULT_CONFIG"
-        echo ""
-        echo "Next steps:"
-        echo "  1. ballast init       # Create ballast file"
-        echo "  2. ballast run        # Start daemon (or use systemd)"
-    fi
-}
-
 cmd_help() {
     cat <<EOF
 ballast - Disk space emergency release system
@@ -462,7 +294,6 @@ Commands:
   init     Create the ballast file
   status   Show disk usage and ballast state
   drop     Manually drop the ballast file
-  setup    Interactive configuration wizard
   version  Print version
   help     Print this help
 
@@ -473,6 +304,8 @@ Defaults (no config needed):
   Ballast: 10GB (or 20% of disk if smaller)
   Drop: when free space < 1.5x ballast (15GB)
   Recover: when free space > 3.0x ballast (30GB)
+
+Configure alerts: sudo nano /etc/ballast.conf
 
 EOF
 }
@@ -511,10 +344,6 @@ main() {
             ;;
         help|--help|-h)
             cmd_help
-            exit 0
-            ;;
-        setup)
-            cmd_setup
             exit 0
             ;;
     esac
