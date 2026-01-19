@@ -17,6 +17,7 @@ set_defaults() {
     monitor_interval="${monitor_interval:-30}"
     monitor_threshold="${monitor_threshold:-90}"
     monitor_recovery="${monitor_recovery:-70}"
+    monitor_auto_recover="${monitor_auto_recover:-true}"
 
     # Calculate ballast size if not set
     if [[ -z "${ballast_size_gb:-}" ]]; then
@@ -194,7 +195,7 @@ check_and_act() {
             fi
             ;;
         dropped)
-            if [[ "$usage" -le "$recovery" ]]; then
+            if [[ "$usage" -le "$recovery" && "${monitor_auto_recover}" == "true" ]]; then
                 echo "$(date -Iseconds) Disk at ${usage}% <= ${recovery}%, recreating ballast"
                 create_ballast
                 send_alerts "recovered" "$usage"
@@ -212,8 +213,8 @@ cmd_run() {
 
     echo "Starting ballast daemon"
     echo "  Monitor: $monitor_path"
-    echo "  Threshold: ${monitor_threshold:-90}%"
-    echo "  Recovery: ${monitor_recovery:-80}%"
+    echo "  Threshold: ${monitor_threshold}%"
+    echo "  Recovery: ${monitor_recovery}% (auto: ${monitor_auto_recover})"
     echo "  Interval: ${interval}s"
     echo "  Ballast: $ballast_path (${ballast_size_gb}GB)"
     echo ""
@@ -260,8 +261,9 @@ cmd_status() {
     fi
     echo ""
     echo "Thresholds:"
-    echo "  Drop at: ${monitor_threshold:-90}%"
-    echo "  Recover at: ${monitor_recovery:-80}%"
+    echo "  Drop at: ${monitor_threshold}%"
+    echo "  Recover at: ${monitor_recovery}%"
+    echo "  Auto-recover: ${monitor_auto_recover}"
 }
 
 cmd_drop() {
@@ -314,6 +316,13 @@ cmd_setup() {
     if [[ "$inp_recovery" -ge "$inp_threshold" ]]; then
         echo "Warning: Recovery must be less than threshold. Using $((inp_threshold - 10))%"
         inp_recovery=$((inp_threshold - 10))
+    fi
+
+    read -p "Auto-recover when disk usage drops? [Y/n]: " inp_auto_recover
+    if [[ "${inp_auto_recover,,}" == "n" ]]; then
+        inp_auto_recover="false"
+    else
+        inp_auto_recover="true"
     fi
 
     # Alerts
@@ -372,6 +381,7 @@ path = $inp_monitor
 interval = $inp_interval
 threshold = $inp_threshold
 recovery = $inp_recovery
+auto_recover = $inp_auto_recover
 
 $(echo -e "$slack_section")
 

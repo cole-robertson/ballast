@@ -35,15 +35,23 @@ sudo systemctl enable --now ballast
 
 Works out of the box with no config file:
 
-| Setting | Default |
-|---------|---------|
-| Ballast size | 10GB (capped at 20% of disk, min 1GB) |
-| Monitor path | `/` |
-| Drop threshold | 90% |
-| Recovery threshold | 70% |
-| Check interval | 30s |
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ballast.path` | `/var/lib/ballast/ballast.dat` | Ballast file location |
+| `ballast.size_gb` | 10 | Size in GB (auto: 20% of disk, min 1GB, max 10GB) |
+| `monitor.path` | `/` | Mount point to monitor |
+| `monitor.interval` | 30 | Check interval in seconds |
+| `monitor.threshold` | 90 | Drop ballast when disk usage >= this % |
+| `monitor.recovery` | 70 | Recreate ballast when usage <= this % |
+| `monitor.auto_recover` | true | Auto-recreate ballast after recovery |
 
 Config file (`/etc/ballast.conf`) overrides defaults. Only needed for alerts or custom settings.
+
+**Why these defaults?**
+- **10GB ballast**: Enough emergency room to SSH in and clean up
+- **90% drop**: Disk is nearly full, time to act
+- **70% recovery**: 20% buffer prevents oscillation on small disks where ballast is a large % of disk
+- **Auto-recover on**: Set-and-forget, system stays protected
 
 ## How It Works
 
@@ -94,6 +102,7 @@ path = /
 interval = 30
 threshold = 90
 recovery = 70
+auto_recover = true  # set to false for one-shot mode
 
 [slack]
 enabled = true
