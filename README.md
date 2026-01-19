@@ -18,19 +18,32 @@ sudo chmod +x /usr/local/bin/ballast
 
 ## Quick Start
 
+**Zero-config (uses smart defaults):**
 ```bash
-# Interactive setup
-sudo ballast setup
+sudo ballast init    # Creates 10GB ballast (or 20% of disk if smaller)
+sudo ballast run     # Monitors /, drops at 90%, recovers at 80%
+```
 
-# Create the ballast file
+**With configuration:**
+```bash
+sudo ballast setup   # Interactive wizard
 sudo ballast init
-
-# Run daemon
-sudo ballast run
-
-# Or use systemd
 sudo systemctl enable --now ballast
 ```
+
+## Smart Defaults
+
+Works out of the box with no config file:
+
+| Setting | Default |
+|---------|---------|
+| Ballast size | 10GB (capped at 20% of disk, min 1GB) |
+| Monitor path | `/` |
+| Drop threshold | 90% |
+| Recovery threshold | 80% |
+| Check interval | 30s |
+
+Config file (`/etc/ballast.conf`) overrides defaults. Only needed for alerts or custom settings.
 
 ## How It Works
 

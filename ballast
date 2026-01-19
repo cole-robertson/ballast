@@ -8,6 +8,45 @@ DEFAULT_CONFIG="/etc/ballast.conf"
 STATE="active"
 
 #
+# Smart defaults
+#
+set_defaults() {
+    # Default paths
+    ballast_path="${ballast_path:-/var/lib/ballast/ballast.dat}"
+    monitor_path="${monitor_path:-/}"
+    monitor_interval="${monitor_interval:-30}"
+    monitor_threshold="${monitor_threshold:-90}"
+    monitor_recovery="${monitor_recovery:-80}"
+
+    # Calculate ballast size if not set
+    if [[ -z "${ballast_size_gb:-}" ]]; then
+        ballast_size_gb=$(calculate_ballast_size "$monitor_path")
+    fi
+}
+
+# Calculate ballast size: 10GB default, cap at 20% of disk, minimum 1GB
+calculate_ballast_size() {
+    local path="$1"
+    local disk_bytes=$(df -B1 "$path" | awk 'NR==2 {print $2}')
+    local disk_gb=$((disk_bytes / 1024 / 1024 / 1024))
+
+    local max_percent_gb=$((disk_gb * 20 / 100))  # 20% of disk
+    local size=10  # default 10GB
+
+    # Cap at 20% of disk
+    if [[ $max_percent_gb -lt $size ]]; then
+        size=$max_percent_gb
+    fi
+
+    # Minimum 1GB
+    if [[ $size -lt 1 ]]; then
+        size=1
+    fi
+
+    echo "$size"
+}
+
+#
 # INI Parser - sets variables like section_key=value
 #
 parse_config() {
@@ -236,23 +275,31 @@ cmd_setup() {
     echo "============="
     echo ""
 
-    # Ballast settings
-    echo "== Ballast File =="
-    read -p "Ballast file path [/var/lib/ballast/ballast.dat]: " inp_path
-    inp_path="${inp_path:-/var/lib/ballast/ballast.dat}"
-
-    read -p "Ballast size in GB [10]: " inp_size
-    inp_size="${inp_size:-10}"
-
-    # Monitor settings
-    echo ""
+    # Monitor path first (needed for size calculation)
     echo "== Disk Monitor =="
     read -p "Mount point to monitor [/]: " inp_monitor
     inp_monitor="${inp_monitor:-/}"
 
+    # Calculate recommended size based on disk
+    local recommended_size=$(calculate_ballast_size "$inp_monitor")
+    local disk_bytes=$(df -B1 "$inp_monitor" | awk 'NR==2 {print $2}')
+    local disk_gb=$((disk_bytes / 1024 / 1024 / 1024))
+
+    # Ballast settings
+    echo ""
+    echo "== Ballast File =="
+    echo "Disk size: ${disk_gb}GB (recommended ballast: ${recommended_size}GB)"
+    read -p "Ballast file path [/var/lib/ballast/ballast.dat]: " inp_path
+    inp_path="${inp_path:-/var/lib/ballast/ballast.dat}"
+
+    read -p "Ballast size in GB [$recommended_size]: " inp_size
+    inp_size="${inp_size:-$recommended_size}"
+
     read -p "Check interval in seconds [30]: " inp_interval
     inp_interval="${inp_interval:-30}"
 
+    echo ""
+    echo "== Thresholds =="
     read -p "Drop threshold % [90]: " inp_threshold
     inp_threshold="${inp_threshold:-90}"
 
@@ -410,8 +457,11 @@ main() {
             ;;
     esac
 
-    # Load config for other commands
-    parse_config "$config"
+    # Load config if exists, otherwise use smart defaults
+    if [[ -f "$config" ]]; then
+        parse_config "$config"
+    fi
+    set_defaults
 
     case "$cmd" in
         run)    cmd_run ;;
